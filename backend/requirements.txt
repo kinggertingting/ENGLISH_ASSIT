@@ -1,0 +1,13 @@
+sqlalchemy
+psycopg[binary]
+python-dotenv
+pydantic
+transformers
+torch
+fastapi
+uvicorn
+python-telegram-bot
+langgraph
+langchain-core
+accelerate
+google-genai
