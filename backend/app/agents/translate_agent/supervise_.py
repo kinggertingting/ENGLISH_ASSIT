@@ -2,18 +2,12 @@ import os
 from typing import List, Optional, TypedDict
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel
 
-from app.agents.analyze_agent import AnalysisResult, SentenceAnalyzer
-from app.agents.model_loader import get_shared_model_and_tokenizer
-from app.agents.sentence_generate_agent import GeneratedSentence, SentenceGenerator
+from app.agents.translate_agent.analyze_agent import AnalysisResult, SentenceAnalyzer
+from app.agents.translate_agent.sentence_generate_agent import GeneratedSentence, SentenceGenerator
+from app.services.llm_service import LLMService
 
 load_dotenv()
-
-
-# =============================================================================
-# LangGraph State Schema
-# =============================================================================
 
 class LearningState(TypedDict):
     user_id: str
@@ -27,11 +21,6 @@ class LearningState(TypedDict):
     generated_exercise: Optional[GeneratedSentence]
     analysis_result: Optional[AnalysisResult]
 
-
-# =============================================================================
-# LangGraph Supervisor Agent
-# =============================================================================
-
 class SupervisorAgent:
     """
     LangGraph-powered Supervisor Agent orchestrating the English learning workflow:
@@ -44,8 +33,10 @@ class SupervisorAgent:
         self,
         generator: Optional[SentenceGenerator] = None,
         analyzer: Optional[SentenceAnalyzer] = None,
+        llm_service: Optional[LLMService] = None,
         lazy_load: bool = True,
     ):
+        self._llm_service = llm_service
         self._generator = generator
         self._analyzer = analyzer
         self._graph = None
@@ -56,18 +47,13 @@ class SupervisorAgent:
         if self._graph is not None:
             return
 
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if api_key:
-            if self._generator is None:
-                self._generator = SentenceGenerator()
-            if self._analyzer is None:
-                self._analyzer = SentenceAnalyzer()
-        else:
-            model, tokenizer = get_shared_model_and_tokenizer()
-            if self._generator is None:
-                self._generator = SentenceGenerator(model=model, tokenizer=tokenizer)
-            if self._analyzer is None:
-                self._analyzer = SentenceAnalyzer(model=model, tokenizer=tokenizer)
+        if self._llm_service is None:
+            self._llm_service = LLMService()
+
+        if self._generator is None:
+            self._generator = SentenceGenerator(llm_service=self._llm_service)
+        if self._analyzer is None:
+            self._analyzer = SentenceAnalyzer(llm_service=self._llm_service)
 
         # ---------------------------------------------------------------------
         # LangGraph StateGraph Definition
