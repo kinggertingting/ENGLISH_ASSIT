@@ -5,9 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.database.connection import SessionLocal
 from app.services.translate_service import TranslateService
+from app.agents.reading_agent.gen_read_agent import ReadingGenerator
 
 router = APIRouter(prefix="/api", tags=["Learning API"])
-
+reading_agent = ReadingGenerator()
 
 # =============================================================================
 # DB Dependency
@@ -168,3 +169,11 @@ def submit_exercise(
 def get_user_stats(user_id: str, db: Session = Depends(get_db)):
     service = TranslateService(db=db)
     return service.get_user_progress(user_id=user_id)
+
+@router.get('/reading')
+def gen_reading(title:str, level:str): 
+    result = reading_agent.generate(
+        title=title,
+        level=level,
+    )
+    return result

@@ -1,14 +1,12 @@
-import json
 import os
-import re
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-load_dotenv()
+from app.services.llm_service import LLMService
 
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+load_dotenv()
 
 
 # State
@@ -19,6 +17,7 @@ class GeneratorInput(TypedDict):
     topic: str
     difficulty: str
     weaknesses: list[str]
+    recent_sentences: Optional[list[str]]
 
 
 # Output Schema
@@ -87,24 +86,18 @@ class SentenceGenerator:
 
     def __init__(
         self,
+        llm_service: Optional[LLMService] = None,
         model=None,
         tokenizer=None,
-        model_name: str = MODEL_NAME,
     ):
-        self.model_name = model_name
-        self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-        if self.api_key:
-            from google import genai
-            self.client = genai.Client(api_key=self.api_key)
+        if llm_service:
+            self.llm_service = llm_service
+        elif model is not None and tokenizer is not None:
+            from app.services.llm_service import LocalTransformersLLMProvider
+            provider = LocalTransformersLLMProvider(model=model, tokenizer=tokenizer)
+            self.llm_service = LLMService(provider=provider)
         else:
-            self.client = None
-            if model is not None and tokenizer is not None:
-                self.model = model
-                self.tokenizer = tokenizer
-            else:
-                from app.agents.model_loader import get_shared_model_and_tokenizer
-                self.model, self.tokenizer = get_shared_model_and_tokenizer(model_name)
+            self.llm_service = LLMService()
 
     # ========================================================
     # Build Prompt
@@ -116,12 +109,18 @@ class SentenceGenerator:
         topic: str,
         difficulty: str,
         weaknesses: list[str],
+        recent_sentences: Optional[list[str]] = None,
     ) -> str:
 
         weaknesses_text = (
             ", ".join(weaknesses)
             if weaknesses
             else "No specific weaknesses yet"
+        )
+        recent_text = (
+            "\n".join([f"- {s}" for s in recent_sentences])
+            if recent_sentences
+            else "None"
         )
 
         return f"""
@@ -139,7 +138,10 @@ Difficulty:
 Learner weaknesses:
 {weaknesses_text}
 
-Prioritize the learner's weaknesses naturally.
+Recently practiced sentences (DO NOT repeat these or their exact structures):
+{recent_text}
+
+Prioritize the learner's weaknesses naturally while keeping the sentence unique.
 
 Remember:
 - Vietnamese sentence only for the learner
@@ -160,6 +162,7 @@ Remember:
         topic: str,
         difficulty: str,
         weaknesses: list[str],
+        recent_sentences: Optional[list[str]] = None,
     ) -> GeneratedSentence:
 
         user_prompt = self._build_prompt(
@@ -167,93 +170,14 @@ Remember:
             topic=topic,
             difficulty=difficulty,
             weaknesses=weaknesses,
+            recent_sentences=recent_sentences,
         )
 
-        # ----------------------------------------------------
-        # Use Gemini API if available
-        # ----------------------------------------------------
-
-        if self.client:
-            from google.genai import types
-            gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-            response = self.client.models.generate_content(
-                model=gemini_model,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    temperature=0.7,
-                ),
-            )
-            data = self._parse_json(response.text)
-            return GeneratedSentence.model_validate(data)
-
-        # ----------------------------------------------------
-        # Local Transformers Fallback
-        # ----------------------------------------------------
-
-        messages = [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            },
-        ]
-
-        text = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
+        data = self.llm_service.generate_json(
+            prompt=user_prompt,
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.7,
+            max_tokens=1024,
         )
 
-        inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-        )
-
-        import torch
-        device = next(self.model.parameters()).device
-        inputs = {key: value.to(device) for key, value in inputs.items()}
-
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=384,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
-                repetition_penalty=1.05,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-
-        generated_tokens = outputs[0, inputs["input_ids"].shape[1] :]
-        generated_text = self.tokenizer.decode(
-            generated_tokens, skip_special_tokens=True
-        ).strip()
-
-        data = self._parse_json(generated_text)
         return GeneratedSentence.model_validate(data)
-
-    # ========================================================
-    # JSON Parser
-    # ========================================================
-
-    @staticmethod
-    def _parse_json(text: str) -> dict:
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            raise ValueError(f"Could not find JSON in model output:\n{text}")
-
-        json_text = match.group(0)
-        try:
-            return json.loads(json_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON generated by model:\n{text}") from exc
